@@ -10,17 +10,6 @@ use serde::{Deserialize, Serialize};
 // [PMUFrame1, PMUFrame2,...] // Frames can be fragmented with many PMUs
 // CHK - Cyclic Redundancy Check // If fragmented, last two bytes of last fragement contain the CHK.
 
-// Header frame common to both configuration and data frames.
-#[derive(Deserialize, Serialize, Debug)]
-pub struct HeaderFrame2024 {
-    pub sync: [u8; 2], // Synchronization bytes, using a u8[2] array here since the first and second byte are read separately.
-    pub framesize: u16, // Frame size in bytes, Max=65535, TODO build a test for checking against out of range frames.
-    pub stream_id: u16, // Data Stream ID, Identifies destination data stream for commands and source stream for other messages.
-    pub soc: u32,       // Timestamp - Time since midnight 01-Jan-1970 (UNIX Time)
-    pub leap_byte: u8, // Leap second information, Bit6-> 0=Add, 1=Delete, Bit5->1=Leap second occured, Bit4-> leap second pending
-    pub fracsec: [u8; 3], // Fractional Part of a seconde multiplied by TIME_BASE? and rounded to nearest integer.
-}
-
 #[derive(Deserialize, Serialize, Debug)]
 pub struct HeaderFrame2011 {
     pub sync: [u8; 2], // Leading byte = AA hex,
@@ -38,14 +27,15 @@ pub struct HeaderFrame2011 {
     // Version 2 (0010) for messaged defined in IEEE STD C37.118.2-2011
     pub framesize: u16, // Total number of bytes in the frame including CHK
     pub idcode: u16,
-    /// Data stream id number
+    // Data stream id number
     pub soc: u32, // Time stamp in UNIX time base. Range is 136 years, rolls over in 2106 AD. Leap seconds not included.
     pub fracsec: u32, // Fraction of second and time quaility, time of measurement of data frames,
-                      //or time of frame transmission for non-data frames
-                      // Bits 31-24: Message Time Quality (TODO needs additional bit mapping)
-                      // Bits 23-00: FRACSEC, 24 Bit integer, when divided by TIME_BASE yields actual fractional second. FRACSEC used in all
-                      // messages to and from a given PMU shall use the same TIME_BASE that is provided in the configuration message from that PMU.
+                  //or time of frame transmission for non-data frames
+                  // Bits 31-24: Message Time Quality (TODO needs additional bit mapping)
+                  // Bits 23-00: FRACSEC, 24 Bit integer, when divided by TIME_BASE yields actual fractional second. FRACSEC used in all
+                  // messages to and from a given PMU shall use the same TIME_BASE that is provided in the configuration message from that PMU.
 }
+// TODO add IMPL to access relevant bits of information in a human-readable manner.
 
 // We need a way to return different structs based on fixed or floating point configurations
 // determined by the configuation frames
@@ -67,13 +57,52 @@ pub struct DataFrame2011 {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct ConfigurationFrame1And2_2011 {
-    // Configuration frames fragment for configuration frames 1-2.
+pub struct ConfigurationFrame1and2_2011 {
+    pub header: HeaderFrame2011,
+    pub time_base: u32, // Resolution of
+    pub num_pmu: u16,
+    // pmu_configs repeated num_pmu times.
+    pub pmu_configs: Vec<PMUConfigurationFrame2011>,
+    pub data_rate: i16, // Rate of Data Transmission.
+    pub chk: u16,
 }
 
+// This struct is repeated NUM_PMU times.
+// For parsing entire configuration frame, need to take into account num_pmu.
 #[derive(Deserialize, Serialize, Debug)]
-pub struct TailFrame2011 {
-    pub chk: u16, // CRC-CCITT
+pub struct PMUConfigurationFrame2011 {
+    pub stn: [u8; 16], // Station Name 16 bytes ASCII
+    pub idcode: u16,   // Data source ID number, identifies source of each data block.
+    pub format: u16,   // Data format within the data frame
+    // 16-bit flag.
+    // Bits 15-4: unused
+    // Bit 3: 0=Freq/DFREQ 16-bit integer 1=Floating point
+    // Bit 2: 0 = analogs 16-bit integer, 1=floating point
+    // Bit 1: phasors 16-bit ineger, 1=floating point
+    // Bit 0: phasor real and imaginary (rectangular), 1=magnitude and angle (polar)
+    pub phnmr: u16,     // Number of phasors - 2 byte integer
+    pub annmr: u16,     // Number of analog values -  2 byte integer
+    pub dgnmr: u16,     // number of digital status words - 2 byte integer
+    pub chnam: Vec<u8>, // Length = 16 x (PHNMR+ANNMR + 16 x DGNMR)
+    // Phasor and channel names, 16 bytes for each phasor analog and each digital channel.
+    pub phunit: Vec<u32>, // length = 4 x PHNMR, Conversion factor for phasor channels
+    pub anunit: Vec<u32>, // length = 4 x ANNMR, Conversion factor for Analog Channels
+    pub digunit: Vec<u32>, // length = 4 x DGNMR, Mask words for digital status words
+    pub fnom: u16,        // Nominal Frequency code and flags
+    pub cfgcnt: u16,      // Configuration change count.
+}
+
+// TODO make IMPL to read out chnam into a list of strings.
+
+// Header frame common to both configuration and data frames.
+#[derive(Deserialize, Serialize, Debug)]
+pub struct HeaderFrame2024 {
+    pub sync: [u8; 2], // Synchronization bytes, using a u8[2] array here since the first and second byte are read separately.
+    pub framesize: u16, // Frame size in bytes, Max=65535, TODO build a test for checking against out of range frames.
+    pub stream_id: u16, // Data Stream ID, Identifies destination data stream for commands and source stream for other messages.
+    pub soc: u32,       // Timestamp - Time since midnight 01-Jan-1970 (UNIX Time)
+    pub leap_byte: u8, // Leap second information, Bit6-> 0=Add, 1=Delete, Bit5->1=Leap second occured, Bit4-> leap second pending
+    pub fracsec: [u8; 3], // Fractional Part of a seconde multiplied by TIME_BASE? and rounded to nearest integer.
 }
 
 #[derive(Deserialize, Serialize, Debug)]
