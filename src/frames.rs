@@ -1,18 +1,33 @@
-use serde::{Deserialize, Serialize};
+#![allow(unused)]
 
 // GOAL: Turn Sequence of Bytes in TCP packets into IEEE C37.118.2 formatted structs.
 
 // Define structures common to all frames
 
 // Configuration Frames for PDU+PMUs
-// Header Frame +
+// Prefix Frame +
 // PDCConfigFrame +
 // [PMUFrame1, PMUFrame2,...] // Frames can be fragmented with many PMUs
 // CHK - Cyclic Redundancy Check // If fragmented, last two bytes of last fragement contain the CHK.
+// CRC-CCITT implementation based on IEEE C37.118.2-2011 Appendix B
+pub fn calculate_crc(buffer: &[u8]) -> u16 {
+    let mut crc: u16 = 0xFFFF;
+    for &byte in buffer {
+        crc ^= (byte as u16) << 8;
+        for _ in 0..8 {
+            if (crc & 0x8000) != 0 {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
+}
 
-#[derive(Deserialize, Serialize, Debug)]
-pub struct HeaderFrame2011 {
-    pub sync: [u8; 2], // Leading byte = AA hex,
+#[derive(Debug)]
+pub struct PrefixFrame2011 {
+    pub sync: u16, // Leading byte = AA hex,
     // second byte: Frame type and version
     // Bit7: reserved=0
     // Bits6-4:
@@ -35,7 +50,110 @@ pub struct HeaderFrame2011 {
                   // Bits 23-00: FRACSEC, 24 Bit integer, when divided by TIME_BASE yields actual fractional second. FRACSEC used in all
                   // messages to and from a given PMU shall use the same TIME_BASE that is provided in the configuration message from that PMU.
 }
-// TODO add IMPL to access relevant bits of information in a human-readable manner.
+impl PrefixFrame2011 {
+    pub fn to_hex(&self) -> [u8; 14] {
+        let mut result = [0u8; 14];
+        result[0..2].copy_from_slice(&self.sync.to_be_bytes());
+        result[2..4].copy_from_slice(&self.framesize.to_be_bytes());
+        result[4..6].copy_from_slice(&self.idcode.to_be_bytes());
+        result[6..10].copy_from_slice(&self.soc.to_be_bytes());
+        result[10..14].copy_from_slice(&self.fracsec.to_be_bytes());
+        result
+    }
+
+    pub fn from_hex(bytes: &[u8; 14]) -> Result<Self, &'static str> {
+        if bytes.len() != 14 {
+            return Err("Invalid byte array length");
+        }
+        Ok(PrefixFrame2011 {
+            sync: u16::from_be_bytes([bytes[0], bytes[1]]),
+            framesize: u16::from_be_bytes([bytes[2], bytes[3]]),
+            idcode: u16::from_be_bytes([bytes[4], bytes[5]]),
+            soc: u32::from_be_bytes([bytes[6], bytes[7], bytes[8], bytes[9]]),
+            fracsec: u32::from_be_bytes([bytes[10], bytes[11], bytes[12], bytes[13]]),
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct HeaderFrame2011 {
+    pub prefix: PrefixFrame2011,
+    pub data_source: [u8; 32], // Data source identifier 32 byte ASCII
+    pub version: [u8; 4],      // Version of data file or stream 4 byte ASCII
+    pub chk: u16,              // CRC-CCITT
+}
+
+// Command Dataframe struct based on 2011 standard
+// Should have a simple IMPL interface to create the 7 basic commands.
+// Skip the custom commands for now.
+#[derive(Debug)]
+pub struct CommandFrame2011 {
+    pub prefix: PrefixFrame2011,
+    pub command: u16,              // Command word
+    pub extframe: Option<Vec<u8>>, // Optional extended frame data
+    pub chk: u16,
+}
+
+impl CommandFrame2011 {
+    pub fn new_turn_off_transmission(idcode: u16) -> Self {
+        Self::new_command(idcode, 1)
+    }
+
+    pub fn new_turn_on_transmission(idcode: u16) -> Self {
+        Self::new_command(idcode, 2)
+    }
+
+    pub fn new_send_header_frame(idcode: u16) -> Self {
+        Self::new_command(idcode, 3)
+    }
+
+    pub fn new_send_config_frame1(idcode: u16) -> Self {
+        Self::new_command(idcode, 4)
+    }
+
+    pub fn new_send_config_frame2(idcode: u16) -> Self {
+        Self::new_command(idcode, 5)
+    }
+
+    pub fn new_send_config_frame3(idcode: u16) -> Self {
+        Self::new_command(idcode, 6)
+    }
+
+    pub fn new_extended_frame(idcode: u16) -> Self {
+        Self::new_command(idcode, 8)
+    }
+
+    // TODO, decide whether to fill in the value now,
+    // or wait until the client sends over TCP.
+    // Second option is most precise.
+    // e.g. get time in seconds and fracsec, calc crc, to_hex, send.
+    fn new_command(idcode: u16, command: u16) -> Self {
+        let prefix = PrefixFrame2011 {
+            sync: 0xAA41,  // Command frame sync
+            framesize: 18, // Fixed size for basic command frame
+            idcode,
+            soc: 0,     // To be filled by sender
+            fracsec: 0, // To be filled by sender
+        };
+        CommandFrame2011 {
+            prefix,
+            command,
+            extframe: None,
+            chk: 0,
+        }
+    }
+    pub fn to_hex(&self) -> Vec<u8> {
+        let mut result = Vec::new();
+        result.extend_from_slice(&self.prefix.to_hex());
+        result.extend_from_slice(&self.command.to_be_bytes());
+        if let Some(extframe) = &self.extframe {
+            result.extend_from_slice(extframe);
+        }
+        let crc = calculate_crc(&result);
+        result.extend_from_slice(&crc.to_be_bytes());
+        result
+    }
+}
 
 #[derive(Debug)]
 pub enum DataFrameType {
@@ -45,12 +163,12 @@ pub enum DataFrameType {
 
 #[derive(Debug)]
 pub struct DataFrame2011 {
-    pub header: HeaderFrame2011,
-    pub data: Vec<DataFrameType>,
+    pub prefix: PrefixFrame2011,
+    pub data: Vec<DataFrameType>, // Length of Vec is based on num phasors.
     pub chk: u16,
 }
 // This frame is repeated for each PMU available.
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Debug)]
 pub struct PMUDataFrameFloat2011 {
     // Header frame above plus the following
     pub stat: u16,         // Bit-mapped flags
@@ -66,7 +184,7 @@ pub struct PMUDataFrameFloat2011 {
                            // The number of values is determined by the DGNMR field in configuration 1, 2, and 3 frames.
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Debug)]
 pub struct PMUDataFrameInt2011 {
     // Header frame above plus the following
     pub stat: u16,         // Bit-mapped flags
@@ -82,9 +200,9 @@ pub struct PMUDataFrameInt2011 {
                       // The number of values is determined by the DGNMR field in configuration 1, 2, and 3 frames.
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Debug)]
 pub struct ConfigurationFrame1and2_2011 {
-    pub header: HeaderFrame2011,
+    pub prefix: PrefixFrame2011,
     pub time_base: u32, // Resolution of
     pub num_pmu: u16,
     // pmu_configs repeated num_pmu times.
@@ -95,7 +213,7 @@ pub struct ConfigurationFrame1and2_2011 {
 
 // This struct is repeated NUM_PMU times.
 // For parsing entire configuration frame, need to take into account num_pmu.
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Debug)]
 pub struct PMUConfigurationFrame2011 {
     pub stn: [u8; 16], // Station Name 16 bytes ASCII
     pub idcode: u16,   // Data source ID number, identifies source of each data block.
@@ -121,7 +239,7 @@ pub struct PMUConfigurationFrame2011 {
 // TODO make IMPL to read out chnam into a list of strings.
 
 // Header frame common to both configuration and data frames.
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Debug)]
 pub struct HeaderFrame2024 {
     pub sync: [u8; 2], // Synchronization bytes, using a u8[2] array here since the first and second byte are read separately.
     pub framesize: u16, // Frame size in bytes, Max=65535, TODO build a test for checking against out of range frames.
@@ -131,7 +249,7 @@ pub struct HeaderFrame2024 {
     pub fracsec: [u8; 3], // Fractional Part of a seconde multiplied by TIME_BASE? and rounded to nearest integer.
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Debug)]
 struct ConfigTailFrame2024 {
     pub stream_data_rate: u16, // Rate of data transmission for the composite frame in stream. (See PMU_DATA_RATE)
     pub wait_time: u16,        // PDC wait time in milliseconds
@@ -140,7 +258,7 @@ struct ConfigTailFrame2024 {
 
 // Additional Data structures for Configuration frames
 // Everything in Common Data frame
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Debug)]
 pub struct PDCConfigurationFrame2024 {
     pub cont_idx: u16, // Continuation index for fragmented frames, 0 no fragments, 1 first frag in series, ...
     pub time_base: u32, // Bits 31-24 reserved =0, Bits23-0 24-bit uint, subdivision of the second that FRACSEC is based on.
@@ -154,7 +272,7 @@ pub struct PDCConfigurationFrame2024 {
 }
 
 // Repeated NUM_PMU times
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Debug)]
 pub struct PMUConfigurationFrame2024 {
     pub pmu_name: String,   // TODO: SHould be 1-256 bytes
     pub pmu_id: u16,        // 1-65534, 0 and 65535 are reserved
