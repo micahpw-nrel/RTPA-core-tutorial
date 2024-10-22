@@ -37,18 +37,44 @@ pub struct HeaderFrame2011 {
 }
 // TODO add IMPL to access relevant bits of information in a human-readable manner.
 
-// We need a way to return different structs based on fixed or floating point configurations
-// determined by the configuation frames
+#[derive(Debug)]
+pub enum DataFrameType {
+    Float(PMUDataFrameFloat2011),
+    Int(PMUDataFrameInt2011),
+}
+
+#[derive(Debug)]
+pub struct DataFrame2011 {
+    pub header: HeaderFrame2011,
+    pub data: Vec<DataFrameType>,
+    pub chk: u16,
+}
 // This frame is repeated for each PMU available.
 #[derive(Deserialize, Serialize, Debug)]
-pub struct DataFrame2011 {
+pub struct PMUDataFrameFloat2011 {
     // Header frame above plus the following
-    pub stat: u16,    // Bit-mapped flags
-    pub phasors: u32, // or u64, Phasor Estimates, May be single phase or 3-phase postive, negative or zero sequence.
+    pub stat: u16,         // Bit-mapped flags
+    pub phasors: Vec<u64>, // or u64, Phasor Estimates, May be single phase or 3-phase postive, negative or zero sequence.
     // Four or 8 bytes each depending on the fixed 16-bit or floating point format used, as indicated by the FORMATE field.
     // in the configuration frame. The number of values is determined by the PHNMR field in configuration 1,2,3 frames.
-    pub freq: u16,   // or u32, 2 or 4 bytes, fixed or floating point.
-    pub dfreq: u16,  // or u32, 2 or 4 bytes, fixed or floating point.
+    pub freq: u32,        // or u32, 2 or 4 bytes, fixed or floating point.
+    pub dfreq: u32,       // or u32, 2 or 4 bytes, fixed or floating point.
+    pub analog: Vec<u32>, // or u32, analog data, 2 or 4 bytes per value depending on fixed or floating point format used,
+    // as indicated by the format field in configuration 1, 2, and 3 frames.
+    // Number of values is determed by the ANNMR in configuration 1,2, and 3 frames.
+    pub digital: Vec<u16>, // Digital data, usually representing 16 digital status points (channels).
+                           // The number of values is determined by the DGNMR field in configuration 1, 2, and 3 frames.
+}
+
+#[derive(Deserialize, Serialize, Debug)]
+pub struct PMUDataFrameInt2011 {
+    // Header frame above plus the following
+    pub stat: u16,         // Bit-mapped flags
+    pub phasors: Vec<u32>, // or u64, Phasor Estimates, May be single phase or 3-phase postive, negative or zero sequence.
+    // Four or 8 bytes each depending on the fixed 16-bit or floating point format used, as indicated by the FORMATE field.
+    // in the configuration frame. The number of values is determined by the PHNMR field in configuration 1,2,3 frames.
+    pub freq: Vec<u16>, // or u32, 2 or 4 bytes, fixed or floating point.
+    pub dfreq: u16,     // or u32, 2 or 4 bytes, fixed or floating point.
     pub analog: u16, // or u32, analog data, 2 or 4 bytes per value depending on fixed or floating point format used,
     // as indicated by the format field in configuration 1, 2, and 3 frames.
     // Number of values is determed by the ANNMR in configuration 1,2, and 3 frames.

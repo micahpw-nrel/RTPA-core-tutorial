@@ -11,8 +11,10 @@ const COMMON_HEADER_SIZE: usize = 14; // Size of HeaderFrame2011 in bytes
 const CONFIG_HEADER_SIZE: usize = 6;
 const TAIL_SIZE: usize = 2; // Size of TailFrame2011 in bytes
 
-// TODO verify this is the algorithm we need.
-// Define the CRC-CCITT (FALSE) algorithm
+// CRC_CCITT defenition
+// Generating Polynomial: X^16+X^12+X^5+1
+// Initial Value: -1 (hex FFFF)
+// No final mask.
 pub const CRC_CCITT_FALSE: Algorithm<u16> = Algorithm {
     width: 16,
     poly: 0x1021,
