@@ -1,38 +1,18 @@
 #![allow(unused)]
 
 use crate::frames::{
-    ConfigurationFrame1and2_2011, DataFrame2011, HeaderFrame2011, PMUConfigurationFrame2011,
+    calculate_crc, ConfigurationFrame1and2_2011, DataFrame2011, HeaderFrame2011,
+    PMUConfigurationFrame2011, PrefixFrame2011,
 };
-use bincode::{deserialize, Error as BincodeError};
-use crc::{Algorithm, Crc};
 
 // Define constants
-const COMMON_HEADER_SIZE: usize = 14; // Size of HeaderFrame2011 in bytes
+const PREFIX_SIZE: usize = 14; // Size of HeaderFrame2011 in bytes
 const CONFIG_HEADER_SIZE: usize = 6;
 const TAIL_SIZE: usize = 2; // Size of TailFrame2011 in bytes
-
-// CRC_CCITT defenition
-// Generating Polynomial: X^16+X^12+X^5+1
-// Initial Value: -1 (hex FFFF)
-// No final mask.
-pub const CRC_CCITT_FALSE: Algorithm<u16> = Algorithm {
-    width: 16,
-    poly: 0x1021,
-    init: 0xFFFF,
-    refin: false,
-    refout: false,
-    xorout: 0x0000,
-    check: 0x29B1,
-    residue: 0x0000,
-};
-
-// Create a Crc instance with the custom algorithm
-pub const CCITT_FALSE: Crc<u16> = Crc::<u16>::new(&CRC_CCITT_FALSE);
 
 #[derive(Debug)]
 pub enum ParseError {
     InsufficientData,
-    DeserializationError(BincodeError),
     InvalidCRC,
     InvalidFrameSize,
     InvalidHeader,
@@ -43,16 +23,13 @@ pub enum ParseError {
 #[derive(Debug)]
 pub enum Frame {
     Header(HeaderFrame2011),
+    Prefix(PrefixFrame2011),
     Configuration(ConfigurationFrame1and2_2011),
     Data(DataFrame2011),
 }
 
 pub fn parse_header(buffer: &[u8]) -> Result<HeaderFrame2011, ParseError> {
-    if buffer.len() < std::mem::size_of::<HeaderFrame2011>() {
-        return Err(ParseError::InsufficientData);
-    }
-
-    deserialize(buffer).map_err(ParseError::DeserializationError)
+    todo!("Impement Header Frame parsing")
 }
 
 pub fn parse_command_frame(buffer: &[u8]) -> Result<Frame, ParseError> {
@@ -71,30 +48,27 @@ pub fn parse_config_frame_1and2(buffer: &[u8]) -> Result<ConfigurationFrame1and2
     // of nested structure.
 
     // get the header frame struct using the parse_header_frame function
-    let common_header: HeaderFrame2011 = match parse_header(buffer) {
-        Ok(header) => header,
-        Err(e) => return Err(e),
-    };
+
+    let prefix_slice: &[u8; PREFIX_SIZE] = buffer[..PREFIX_SIZE].try_into().unwrap();
+    let common_header =
+        PrefixFrame2011::from_hex(prefix_slice).map_err(|_| ParseError::InvalidHeader)?;
 
     // read the 4 bytes that come directly after the first 14 header bytes
     // into variable time_base. Read the next two bytes after that into num_pmu;
     let time_base: u32 = u32::from_be_bytes([
-        buffer[COMMON_HEADER_SIZE],
-        buffer[COMMON_HEADER_SIZE + 1],
-        buffer[COMMON_HEADER_SIZE + 2],
-        buffer[COMMON_HEADER_SIZE + 3],
+        buffer[PREFIX_SIZE],
+        buffer[PREFIX_SIZE + 1],
+        buffer[PREFIX_SIZE + 2],
+        buffer[PREFIX_SIZE + 3],
     ]);
-    let num_pmu: u16 = u16::from_be_bytes([
-        buffer[COMMON_HEADER_SIZE + 4],
-        buffer[COMMON_HEADER_SIZE + 5],
-    ]);
+    let num_pmu: u16 = u16::from_be_bytes([buffer[PREFIX_SIZE + 4], buffer[PREFIX_SIZE + 5]]);
 
     // Create a buffer offset variable that starts after
     // COMMMON_HEADER_SIZE and CONFIG_HEADER_SIZE
     // create a for loop based on config_header.num_pmu:
     // Read the next 26 bytes into a PMUConfigurationFrame2011 struct.
     // Increment the offset by 26 bytes.
-    let mut offset = COMMON_HEADER_SIZE + 6;
+    let mut offset = PREFIX_SIZE + 6;
 
     // PMU and Channel Configs should be same length.
     let mut pmu_configs = Vec::new();
@@ -181,7 +155,7 @@ pub fn parse_config_frame_1and2(buffer: &[u8]) -> Result<ConfigurationFrame1and2
     }
     // Generate the configuration frame 1 and 2 based on the variables throughout this function.
     let config_frame = ConfigurationFrame1and2_2011 {
-        header: common_header,
+        prefix: common_header,
         time_base,
         num_pmu,
         pmu_configs,
@@ -261,8 +235,4 @@ pub fn parse_frame(buffer: &[u8]) -> Result<Frame, ParseError> {
         0b100 => parse_command_frame(buffer),
         _ => Err(ParseError::InvalidFrameSize),
     }
-}
-
-pub fn calculate_crc(data: &[u8]) -> u16 {
-    CCITT_FALSE.checksum(data)
 }

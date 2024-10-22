@@ -1,79 +1,127 @@
 #![allow(unused)]
+use std::fs;
+use std::path::Path;
+
+fn read_hex_file(file_name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let path = Path::new("tests/test_data").join(file_name);
+    let content = fs::read_to_string(path)?;
+    let hex_string: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+
+    hex_string
+        .as_bytes()
+        .chunks(2)
+        .map(|chunk| {
+            let hex_byte = std::str::from_utf8(chunk).unwrap();
+            u8::from_str_radix(hex_byte, 16).map_err(|e| e.into())
+        })
+        .collect()
+}
 
 #[cfg(test)]
 mod tests {
-    use pmu::frame_parser::{calculate_crc, parse_complete_frame};
-    use pmu::frames::{DataFrame2011, HeaderFrame2011, HeaderFrame2024, TailFrame2011};
-    use pmu::mocks::{
-        mock_complete_frame2011, mock_dataframe2011, mock_header2011, mock_header2024,
-        mock_invalid_frame, mock_tailframe2011,
+    use pmu::frame_parser::parse_config_frame_1and2;
+    use pmu::frames::{
+        calculate_crc, ConfigurationFrame1and2_2011, DataFrame2011, PrefixFrame2011,
     };
 
     #[test]
-    fn test_header_parse() {
-        let mock_header = mock_header2011();
-        let header_decoded: HeaderFrame2011 = bincode::deserialize(&mock_header).unwrap();
+    fn test_calculate_crc_standard_values() {
+        // Test values from Table B.1 of IEEE C37.118.2-2011 standard
+        let test_cases = [
+            (vec![0x41, 0x42, 0x43, 0x44], 0xBFFA),
+            (vec![0x31, 0x32, 0x33, 0x34, 0x35, 0x36], 0x2EF4),
+            (vec![0x61, 0x62, 0x63], 0x514A),
+        ];
 
-        assert_eq!(header_decoded.fracsec, 456);
+        for (input, expected_crc) in test_cases.iter() {
+            let calculated_crc = calculate_crc(input);
+            assert_eq!(
+                calculated_crc, *expected_crc,
+                "CRC mismatch for input: {:?}",
+                input
+            );
+        }
     }
     #[test]
-    fn test_header2024_parse() {
-        let mock_header = mock_header2024();
-        let header_decoded: HeaderFrame2024 = bincode::deserialize(&mock_header).unwrap();
-        assert_eq!(header_decoded.stream_id, 1234);
-    }
+    fn test_crc_validation() {
+        let files = ["cmd_message.bin", "config_message.bin", "data_message.bin"];
 
-    #[test]
-    fn test_dataframe2011_parse() {
-        let mock_data = mock_dataframe2011();
-        let data_decoded: DataFrame2011 = bincode::deserialize(&mock_data).unwrap();
-        assert!(data_decoded.stat > 0); // Just checking if it's not zero, as it's random
-    }
+        for file in files.iter() {
+            let buffer = super::read_hex_file(file).unwrap();
+            let frame_size = u16::from_be_bytes([buffer[2], buffer[3]]) as usize;
+            let calculated_crc = calculate_crc(&buffer[..frame_size - 2]);
+            let frame_crc = u16::from_be_bytes([buffer[frame_size - 2], buffer[frame_size - 1]]);
 
-    #[test]
-    fn test_tailframe2011_parse() {
-        let mock_tail = mock_tailframe2011();
-        let tail_decoded: TailFrame2011 = bincode::deserialize(&mock_tail).unwrap();
-        assert_eq!(tail_decoded.chk, 0xABCD);
-    }
-
-    #[test]
-    fn test_complete_frame_parse() {
-        let complete_frame = mock_complete_frame2011();
-        // Here you would implement your frame parsing logic and test it
-        // For example:
-        let parsed_frame = parse_complete_frame(&complete_frame);
-        assert!(parsed_frame.is_ok());
-    }
-
-    #[test]
-    fn test_invalid_frame() {
-        let invalid_frame = mock_invalid_frame();
-        // Here you would test your error handling for invalid frames
-        // For example:
-        // let result = parse_complete_frame(&invalid_frame);
-        // assert!(result.is_err());
-    }
-    #[test]
-    fn test_parse_complete_frame() {
-        let complete_frame = mock_complete_frame2011();
-        let result = parse_complete_frame(&complete_frame);
-        assert!(result.is_ok(), "Failed to parse complete frame");
-
-        if let Ok((header, config, tail)) = result {
-            // Add assertions to check the parsed data
-            assert_eq!(header.framesize, complete_frame.len() as u16);
-            // Add more assertions for config and tail...
+            assert_eq!(calculated_crc, frame_crc, "CRC mismatch for file: {}", file);
         }
     }
 
     #[test]
-    fn test_crc_calculation() {
-        let complete_frame = mock_complete_frame2011();
-        let framesize = u16::from_be_bytes([complete_frame[2], complete_frame[3]]) as usize;
-        let calculated_crc = calculate_crc(&complete_frame[..framesize - 2]);
-        let frame_crc =
-            u16::from_be_bytes([complete_frame[framesize - 2], complete_frame[framesize - 1]]);
-        assert_eq!(calculated_crc, frame_crc, "CRC mismatch");
+    fn test_command_frame_to_hex() {
+        use pmu::frames::CommandFrame2011;
+
+        // Create a CommandFrame2011 struct with the expected values
+        let command_frame = CommandFrame2011 {
+            prefix: PrefixFrame2011 {
+                sync: 0xAA41,
+                framesize: 18,
+                idcode: 7734,
+                soc: 1149591600,
+                fracsec: 252428240, //byteorder=bigendian
+            },
+            command: 2,
+            extframe: None,
+            chk: 0, //to be filled by to_hex method.
+        };
+
+        // Convert the struct to a Vec<u8>
+        let frame_bytes = command_frame.to_hex();
+
+        // Read the hex file
+        let file_bytes = super::read_hex_file("cmd_message.bin").unwrap();
+
+        // Compare the generated bytes with the file contents
+        assert_eq!(
+            frame_bytes, file_bytes,
+            "Generated command frame does not match the file contents"
+        );
+    }
+
+    // Tests the parse_config_frame1and2_2011 function
+    // Uses test data from the IEEE C37.118.2 2011 standard.
+    // Tests that certain values are parsed correctly.
+    #[test]
+    fn test_parse_config_frame() {
+        let buffer = super::read_hex_file("config_message.bin").unwrap();
+        let result = parse_config_frame_1and2(&buffer);
+
+        assert!(result.is_ok(), "Failed to parse configuration frame");
+
+        let config_frame = result.unwrap();
+
+        // Add assertions to verify the parsed data
+        println!("Config frame prefix: {:?}", config_frame.prefix);
+        assert_eq!(config_frame.prefix.framesize, 454);
+        assert_eq!(config_frame.prefix.idcode, 7734);
+        assert_eq!(config_frame.time_base, 1000000);
+        assert_eq!(config_frame.num_pmu, 1);
+        assert_eq!(config_frame.data_rate, 30);
+
+        // Verify PMU configuration
+        let pmu_config = &config_frame.pmu_configs[0];
+        //assert_eq!(pmu_config.stn, *b"Station A        ");
+        assert_eq!(pmu_config.idcode, 7734);
+        assert_eq!(pmu_config.format, 4);
+        assert_eq!(pmu_config.phnmr, 4);
+        assert_eq!(pmu_config.annmr, 3);
+        assert_eq!(pmu_config.dgnmr, 1);
+
+        // TODO Add more assertions as needed to verify other fields
+        // Verify CRC
+        let calculated_crc = calculate_crc(&buffer[..buffer.len() - 2]);
+        assert_eq!(
+            calculated_crc, config_frame.chk,
+            "CRC mismatch in configuration frame"
+        );
     }
 }
