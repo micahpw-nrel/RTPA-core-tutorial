@@ -2,7 +2,8 @@
 
 use crate::frames::{
     calculate_crc, ConfigurationFrame1and2_2011, DataFrame2011, HeaderFrame2011,
-    PMUConfigurationFrame2011, PrefixFrame2011,
+    PMUConfigurationFrame2011, PMUDataFrame, PMUDataFrameFixedFreq2011, PMUDataFrameFloatFreq2011,
+    PMUFrameType, PrefixFrame2011,
 };
 
 // Define constants
@@ -37,10 +38,111 @@ pub fn parse_command_frame(buffer: &[u8]) -> Result<Frame, ParseError> {
     todo!("Implement command frame parsing")
 }
 
-pub fn parse_data_frames(buffer: &[u8]) -> Result<DataFrame2011, ParseError> {
+pub fn parse_data_frames(
+    buffer: &[u8],
+    config: &ConfigurationFrame1and2_2011,
+) -> Result<DataFrame2011, ParseError> {
     // data frame parsing here.
     // TODO
-    todo!("Implement data frame parsing")
+
+    // First get prefix frame
+    let prefix_slice: &[u8; PREFIX_SIZE] = buffer[..PREFIX_SIZE].try_into().unwrap();
+    let prefix = PrefixFrame2011::from_hex(prefix_slice).map_err(|_| ParseError::InvalidHeader)?;
+
+    let mut data: Vec<PMUFrameType> = Vec::new();
+
+    // Make an offset variable and
+    let mut offset = PREFIX_SIZE;
+
+    // for config in config.pmu_configs.
+    // Need to get data format, phnmr, annmr, dgnmr and format from
+    // from each pmu configuration.
+    // determine whether to use PMUDataFrameFloat2011
+    // or PMUDataFrameInt2011.
+    // Determine next N bytes to read and parse the individual PMU Frame.
+    for config in &config.pmu_configs {
+        // Values for each individual pmu
+        let phnmr = config.phnmr;
+        let annmr = config.annmr;
+        let dgnmr = config.dgnmr;
+
+        let phasor_datum_usize = config.phasor_size();
+        let analog_datum_usize = config.analog_size();
+        let freq_dfreq_usize = config.freq_dfreq_size();
+
+        // phasor should be vec<u8> with length 2*phasor_datum_usize*phnmr
+        // analog should be vec<u8> with length analog_datum_usize*annmr
+        let pmu_frame = if freq_dfreq_usize == 2 {
+            let stat = u16::from_be_bytes([buffer[offset], buffer[offset + 1]]);
+            offset += 2;
+
+            let phasors = buffer[offset..offset + phasor_datum_usize * phnmr as usize].to_vec();
+            offset += phasor_datum_usize * phnmr as usize;
+
+            let freq = i16::from_be_bytes([buffer[offset], buffer[offset + 1]]);
+            offset += 2;
+
+            let dfreq = i16::from_be_bytes([buffer[offset], buffer[offset + 1]]);
+            offset += 2;
+
+            let analog = buffer[offset..offset + analog_datum_usize * annmr as usize].to_vec();
+            offset += analog_datum_usize * annmr as usize;
+
+            let digital = buffer[offset..offset + 2 * dgnmr as usize].to_vec();
+            offset += 2 * dgnmr as usize;
+
+            PMUFrameType::Fixed(PMUDataFrameFixedFreq2011 {
+                stat,
+                phasors,
+                freq,
+                dfreq,
+                analog,
+                digital,
+            })
+        } else {
+            let stat = u16::from_be_bytes([buffer[offset], buffer[offset + 1]]);
+            offset += 2;
+
+            let phasors = buffer[offset..offset + 2 * phasor_datum_usize * phnmr as usize].to_vec();
+            offset += 2 * phasor_datum_usize * phnmr as usize;
+
+            let freq = f32::from_be_bytes([
+                buffer[offset],
+                buffer[offset + 1],
+                buffer[offset + 2],
+                buffer[offset + 3],
+            ]);
+            offset += 4;
+
+            let dfreq = f32::from_be_bytes([
+                buffer[offset],
+                buffer[offset + 1],
+                buffer[offset + 2],
+                buffer[offset + 3],
+            ]);
+            offset += 4;
+
+            let analog = buffer[offset..offset + analog_datum_usize * annmr as usize].to_vec();
+            offset += analog_datum_usize * annmr as usize;
+
+            let digital = buffer[offset..offset + 2 * dgnmr as usize].to_vec();
+            offset += 2 * dgnmr as usize;
+
+            PMUFrameType::Floating(PMUDataFrameFloatFreq2011 {
+                stat,
+                phasors,
+                freq,
+                dfreq,
+                analog,
+                digital,
+            })
+        };
+        data.push(pmu_frame);
+    }
+    // Read the CRC (chk) from the last two bytes of the buffer
+    let chk = u16::from_be_bytes([buffer[buffer.len() - 2], buffer[buffer.len() - 1]]);
+
+    Ok(DataFrame2011 { prefix, data, chk })
 }
 
 pub fn parse_config_frame_1and2(buffer: &[u8]) -> Result<ConfigurationFrame1and2_2011, ParseError> {
@@ -171,7 +273,10 @@ pub fn parse_config_frame_3(buffer: &[u8]) -> Result<Frame, ParseError> {
     todo!("Implement Config Frame type 3 parsing.")
 }
 
-pub fn parse_frame(buffer: &[u8]) -> Result<Frame, ParseError> {
+pub fn parse_frame(
+    buffer: &[u8],
+    config: ConfigurationFrame1and2_2011,
+) -> Result<Frame, ParseError> {
     // read first two bytes as the sync variable.
     // read second byte and convert to binary
     // check bits 3-0 to get version number of IEEE standard.
@@ -220,7 +325,7 @@ pub fn parse_frame(buffer: &[u8]) -> Result<Frame, ParseError> {
     let frame_type = (buffer[1] >> 4) & 0b111;
     match frame_type {
         0b000 => {
-            let data_frame = parse_data_frames(buffer)?;
+            let data_frame = parse_data_frames(buffer, &config)?;
             Ok(Frame::Data(data_frame))
         }
         0b001 => {
