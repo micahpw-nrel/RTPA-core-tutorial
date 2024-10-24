@@ -19,9 +19,10 @@ fn read_hex_file(file_name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>>
 
 #[cfg(test)]
 mod tests {
-    use pmu::frame_parser::parse_config_frame_1and2;
+    use pmu::frame_parser::{parse_config_frame_1and2, parse_data_frames};
     use pmu::frames::{
-        calculate_crc, ConfigurationFrame1and2_2011, DataFrame2011, PrefixFrame2011,
+        calculate_crc, ConfigurationFrame1and2_2011, DataFrame2011, PMUConfigurationFrame2011,
+        PMUFrameType, PMUValues, PrefixFrame2011,
     };
 
     #[test]
@@ -123,5 +124,91 @@ mod tests {
             calculated_crc, config_frame.chk,
             "CRC mismatch in configuration frame"
         );
+    }
+
+    #[test]
+    fn test_parse_data_frame() {
+        // First, parse the configuration frame
+        let config_buffer = super::read_hex_file("config_message.bin").unwrap();
+        let config_result = parse_config_frame_1and2(&config_buffer);
+        assert!(config_result.is_ok(), "Failed to parse configuration frame");
+        let config_frame = config_result.unwrap();
+
+        let pmu_config = &config_frame.pmu_configs[0];
+        println!("phnmr: {}", pmu_config.phnmr);
+        println!("annmr: {}", pmu_config.annmr);
+        println!("phasor_usize: {}", pmu_config.phasor_size());
+        println!("analog_usize: {}", pmu_config.analog_size());
+        println!("freq_dfreq_usize: {}", pmu_config.freq_dfreq_size());
+
+        // Now, parse the data frame
+        let data_buffer = super::read_hex_file("data_message.bin").unwrap();
+        let data_result = parse_data_frames(&data_buffer, &config_frame);
+        assert!(data_result.is_ok(), "Failed to parse data frame");
+        let data_frame = data_result.unwrap();
+
+        // Add assertions to verify the parsed data
+        // All test data is based on Table D.1 of IEEE C37.118.2 - 2011
+        assert_eq!(data_frame.prefix.framesize, 52);
+        assert_eq!(data_frame.prefix.idcode, 7734);
+        assert_eq!(data_frame.prefix.soc, 1149580800);
+        assert_eq!(data_frame.prefix.fracsec, 16817);
+
+        // Verify PMU data
+        assert_eq!(data_frame.data.len(), 1);
+        //let pmu_data = &data_frame.data[0];
+
+        //assert_eq!(pmu_data.stat, 0x0000);
+        // Verify PMU data
+        let pmu_data = match &data_frame.data[0] {
+            PMUFrameType::Fixed(data) => data,
+            _ => panic!("Expected PMUDataFrameFloating"),
+        };
+
+        assert_eq!(pmu_data.stat, 0x0000);
+        // Verify phasors, frequency, dfreq, analog, and digital values
+        // Note: These assertions might need adjustment based on your exact parsing logic
+        assert_eq!(pmu_data.phasors.len(), 16); // Size in Bytes
+        assert_eq!(pmu_data.freq, 2500);
+        assert_eq!(pmu_data.dfreq, 0);
+        assert_eq!(pmu_data.analog.len(), 12); // Size in Bytes
+        assert_eq!(pmu_data.digital.len(), 2); // Size in Bytes
+
+        let phasor_values = match &data_frame.data[0] {
+            PMUFrameType::Fixed(data) => data.parse_phasors(pmu_config),
+            PMUFrameType::Floating(data) => data.parse_phasors(pmu_config),
+        };
+
+        let is_polar = pmu_config.is_phasor_polar();
+        assert_eq!(is_polar, false);
+
+        // Test Phasor values
+        assert_eq!(phasor_values[0], PMUValues::Fixed(vec![14635, 0]));
+        assert_eq!(phasor_values[1], PMUValues::Fixed(vec![-7318, -12676]));
+        assert_eq!(phasor_values[2], PMUValues::Fixed(vec![-7318, 12675]));
+        assert_eq!(phasor_values[3], PMUValues::Fixed(vec![1092, 0]));
+
+        // Test Analog Values
+        let analog_values = match &data_frame.data[0] {
+            PMUFrameType::Fixed(data) => data.parse_analogs(pmu_config),
+            PMUFrameType::Floating(data) => data.parse_analogs(pmu_config),
+        };
+
+        assert_eq!(
+            analog_values,
+            PMUValues::Float(vec![100.0, 1000.0, 10000.0])
+        );
+        // Test Digital Values
+        let digital_values = match &data_frame.data[0] {
+            PMUFrameType::Fixed(data) => data.parse_digitals(),
+            PMUFrameType::Floating(data) => data.parse_digitals(),
+        };
+
+        println!("Digital Values: {:016b}", digital_values[0]); // Display as 16-bit binary
+
+        assert_eq!(digital_values[0], 0b0011110000010010); // Test all alternating high/low bits
+                                                           // Verify CRC
+        let calculated_crc = calculate_crc(&data_buffer[..data_buffer.len() - 2]);
+        assert_eq!(calculated_crc, data_frame.chk, "CRC mismatch in data frame");
     }
 }
