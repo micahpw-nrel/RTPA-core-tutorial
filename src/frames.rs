@@ -261,7 +261,38 @@ pub struct ConfigurationFrame1and2_2011 {
     pub data_rate: i16, // Rate of Data Transmission.
     pub chk: u16,
 }
+impl ConfigurationFrame1and2_2011 {
+    pub fn calc_data_frame_size(&self) -> usize {
+        // We should be able to calculate the expected data frame size based on
+        // num_pmu, and the values in each PMUConfigurationFrame
+        // namely, format, phnmr, annmr,
+        // there should also be a fixed amount of size to be added based
+        // on common things like PrefixFrame, chk and others.
+        // Common Frame Parts:
+        // PrefixFrame (14 bytes) + CHK (2 bytes) = 16 bytes
+        let mut total_size = 16;
 
+        // For each PMU, we need to calculate the size of its data
+        for pmu_config in &self.pmu_configs {
+            // Each PMU starts with STAT (2 bytes)
+            total_size += 2;
+
+            // Add phasor data size
+            total_size += pmu_config.phasor_size() * pmu_config.phnmr as usize;
+
+            // Add FREQ/DFREQ size (both use same format)
+            total_size += 2 * pmu_config.freq_dfreq_size();
+
+            // Add analog values size
+            total_size += pmu_config.analog_size() * pmu_config.annmr as usize;
+
+            // Add digital status words (2 bytes each)
+            total_size += 2 * pmu_config.dgnmr as usize;
+        }
+
+        total_size
+    }
+}
 // This struct is repeated NUM_PMU times.
 // For parsing entire configuration frame, need to take into account num_pmu.
 #[derive(Debug)]
