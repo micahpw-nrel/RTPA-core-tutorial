@@ -23,17 +23,25 @@ enum BufferType {
     Heap(VecDeque<(SystemTime, Vec<u8>)>), // Heap buffer with timestamps
 }
 
+pub enum ControlMessage {
+    Stop,
+    GetBuffer,
+    GetBufferDuration(Duration),
+}
+
 pub struct PDCClient {
     stream: TcpStream,
     //allocate 30 kB to the stack to serve as a ring buffer.
     buffer: BufferType,
-    buffer_duration: Duration,
-    frame_size: usize,
-    write_offset: usize,
-    idcode: u16,
-    tx: mpsc::Sender<()>,
-    rx: mpsc::Receiver<()>,
-    config: Option<ConfigurationFrame1and2_2011>,
+    pub buffer_duration: Duration,
+    pub frame_size: usize,
+    pub write_offset: usize,
+    pub idcode: u16,
+    pub control_tx: mpsc::Sender<ControlMessage>,
+    control_rx: mpsc::Receiver<ControlMessage>,
+    data_tx: mpsc::Sender<Vec<u8>>,
+    pub data_rx: mpsc::Receiver<Vec<u8>>,
+    pub config: Option<ConfigurationFrame1and2_2011>,
 }
 
 impl PDCClient {
@@ -45,7 +53,8 @@ impl PDCClient {
         buffer_duration: Duration,
     ) -> Result<Self, std::io::Error> {
         let stream = TcpStream::connect(format!("{}:{}", host, port))?;
-        let (tx, rx) = mpsc::channel();
+        let (control_tx, control_rx) = mpsc::channel();
+        let (data_tx, data_rx) = mpsc::channel();
 
         let mut client = PDCClient {
             stream,
@@ -54,8 +63,10 @@ impl PDCClient {
             frame_size: 0,
             write_offset: 0,
             idcode,
-            tx,
-            rx,
+            control_tx,
+            control_rx,
+            data_tx,
+            data_rx,
             config: None,
         };
 
@@ -66,7 +77,18 @@ impl PDCClient {
         Ok(client)
     }
     fn verify_frame_crc(&self, buffer_data: &[u8]) -> bool {
-        todo!("Calculate the crc value based on the frame - last 2 bytes");
+        let calculated_crc = calculate_crc(&buffer_data[..buffer_data.len() - 2]);
+        let frame_crc = u16::from_be_bytes([
+            buffer_data[buffer_data.len() - 2],
+            buffer_data[buffer_data.len() - 1],
+        ]);
+
+        if calculated_crc != frame_crc {
+            eprintln!("CRC check failed for frame");
+            return false;
+        }
+
+        true
     }
     fn calculate_frame_size(&self) -> usize {
         // Calculate frame size based on configuration
@@ -153,36 +175,52 @@ impl PDCClient {
         //self.stream.write_all(&config_frame_bytes).unwrap();
     }
 
-    pub fn start_stream(mut self) {
-        // TODO we should add some code to send two command frames.
-        // 1. Get the configuration frame.
-        // 2. Start the Data Stream.
-
-        std::thread::spawn(move || {
-            self.receive_loop();
-        });
-    }
-
-    pub fn stop_stream(&self) {
-        self.tx.send(()).unwrap(); // Tell the background thread to stop
-    }
-
-    fn receive_loop(&mut self) {
-        let mut temp_buffer = Vec::new();
-
+    pub fn start_stream(&mut self) {
         loop {
-            let mut buf = [0u8; 1024];
-
-            // Check for stop signal
-            match self.rx.try_recv() {
-                Ok(_) | Err(mpsc::TryRecvError::Disconnected) => {
-                    let stop_cmd = CommandFrame2011::new_turn_off_transmission(self.idcode);
-                    self.stream.write_all(&stop_cmd.to_hex()).unwrap();
-                    break;
+            // Check for control messages
+            match self.control_rx.try_recv() {
+                Ok(ControlMessage::Stop) => break,
+                Ok(ControlMessage::GetBuffer) => {
+                    // Send entire buffer
+                    match &self.buffer {
+                        BufferType::Stack(buf) => {
+                            self.data_tx
+                                .send(buf[..self.write_offset].to_vec())
+                                .unwrap();
+                        }
+                        BufferType::Heap(buf) => {
+                            for (_, frame) in buf.iter() {
+                                self.data_tx.send(frame.clone()).unwrap();
+                            }
+                        }
+                    }
+                }
+                Ok(ControlMessage::GetBufferDuration(duration)) => {
+                    // Send buffer for specified duration
+                    match &self.buffer {
+                        BufferType::Stack(buf) => {
+                            // You'll need to implement duration-based filtering for stack buffer
+                            self.data_tx
+                                .send(buf[..self.write_offset].to_vec())
+                                .unwrap();
+                        }
+                        BufferType::Heap(buf) => {
+                            let threshold = SystemTime::now() - duration;
+                            for (timestamp, frame) in buf.iter() {
+                                if *timestamp >= threshold {
+                                    self.data_tx.send(frame.clone()).unwrap();
+                                }
+                            }
+                        }
+                    }
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => break,
             }
 
+            // Regular stream reading logic...
+            // When storing frames, also send them through the data channel
+            let mut buf = [0u8; 1024];
             match self.stream.read(&mut buf) {
                 Ok(n) if n >= 14 => {
                     // Read prefix to get frame size
@@ -195,15 +233,7 @@ impl PDCClient {
                             let frame_data = &buf[..frame_size];
                             if self.verify_frame_crc(frame_data) {
                                 self.store_frame(frame_data);
-                            }
-                        } else {
-                            // Partial frame, collect in temp buffer
-                            temp_buffer.extend_from_slice(&buf[..n]);
-                            if temp_buffer.len() >= frame_size {
-                                if self.verify_frame_crc(&temp_buffer[..frame_size]) {
-                                    self.store_frame(&temp_buffer[..frame_size]);
-                                }
-                                temp_buffer.clear();
+                                self.data_tx.send(frame_data.to_vec()).unwrap();
                             }
                         }
                     }
@@ -215,6 +245,11 @@ impl PDCClient {
             }
         }
     }
+
+    pub fn get_control_sender(&self) -> mpsc::Sender<ControlMessage> {
+        self.control_tx.clone()
+    }
+
     // End of Receive loop.
     //
     fn store_frame(&mut self, frame_data: &[u8]) {

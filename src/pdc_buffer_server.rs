@@ -14,9 +14,10 @@
 // What it shouldn't do. (for now)
 // Send configuration commands to the upstream pdc server.
 //
+#![allow(unused)]
 use std::env;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
 use axum::{
@@ -27,12 +28,12 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
-use tower_http::trace::TraceLayer;
+//use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::frame_parser::parse_frame;
-use crate::frames::DataFrame2011;
-use crate::pdc_client::PDCClient;
+use crate::frames::{ChannelDataType, ChannelInfo, ConfigurationFrame1and2_2011};
+use crate::pdc_client::{ControlMessage, PDCClient};
 
 // Environment configuration struct
 #[derive(Debug)]
@@ -73,7 +74,8 @@ impl Config {
 // Application state
 #[derive(Clone)]
 struct AppState {
-    pdc_client: Arc<Mutex<PDCClient>>,
+    control_tx: mpsc::Sender<ControlMessage>,
+    data_rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
 }
 
 // Response types

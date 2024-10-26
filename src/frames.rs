@@ -1,4 +1,5 @@
 #![allow(unused)]
+use std::collections::HashMap;
 // GOAL: Turn Sequence of Bytes in TCP packets into IEEE C37.118.2 formatted structs.
 // Define structures common to all frames
 
@@ -251,6 +252,25 @@ impl<T> PMUDataFrame<T> {
 pub type PMUDataFrameFixedFreq2011 = PMUDataFrame<i16>;
 pub type PMUDataFrameFloatFreq2011 = PMUDataFrame<f32>;
 
+#[derive(Debug, Clone)]
+pub enum ChannelDataType {
+    PhasorFloat, // 8 bytes (magnitude + angle as f32)
+    PhasorFixed, // 4 bytes (magnitude + angle as i16)
+    AnalogFloat, // 4 bytes (f32)
+    AnalogFixed, // 2 bytes (i16)
+    Digital,     // 2 bytes (u16)
+    FreqFloat,   // 4 bytes (f32)
+    FreqFixed,   // 2 bytes (i16)
+    DfreqFloat,  // 4 bytes (f32)
+    DfreqFixed,  // 2 bytes (i16)
+}
+#[derive(Debug, Clone)]
+pub struct ChannelInfo {
+    pub data_type: ChannelDataType,
+    pub offset: usize, // Offset from start of PMU data section
+    pub size: usize,   // Size in bytes
+}
+
 #[derive(Debug)]
 pub struct ConfigurationFrame1and2_2011 {
     pub prefix: PrefixFrame2011,
@@ -291,6 +311,112 @@ impl ConfigurationFrame1and2_2011 {
         }
 
         total_size
+    }
+    pub fn get_channel_map(&self) -> HashMap<String, ChannelInfo> {
+        let mut channel_map = HashMap::new();
+        let mut current_offset = 2; // Start after STAT
+        let prefix_offset = 14;
+
+        for pmu_config in &self.pmu_configs {
+            let station_name = String::from_utf8_lossy(&pmu_config.stn).trim().to_string();
+            let channel_names = pmu_config.get_column_names();
+            let id_code = pmu_config.idcode;
+            // Add frequency and DFREQ channels
+            let freq_type = if pmu_config.format & 0x0008 != 0 {
+                ChannelDataType::FreqFloat
+            } else {
+                ChannelDataType::FreqFixed
+            };
+            let dfreq_type = if pmu_config.format & 0x0008 != 0 {
+                ChannelDataType::DfreqFloat
+            } else {
+                ChannelDataType::DfreqFixed
+            };
+
+            // Add phasor channels
+            let phasor_type = if pmu_config.format & 0x0002 != 0 {
+                ChannelDataType::PhasorFloat
+            } else {
+                ChannelDataType::PhasorFixed
+            };
+
+            let phasor_size = pmu_config.phasor_size();
+            for name in channel_names.iter().take(pmu_config.phnmr as usize) {
+                channel_map.insert(
+                    name.clone(),
+                    ChannelInfo {
+                        data_type: phasor_type.clone(),
+                        offset: current_offset + prefix_offset,
+                        size: phasor_size,
+                    },
+                );
+                current_offset += phasor_size;
+            }
+
+            let freq_size = pmu_config.freq_dfreq_size();
+            channel_map.insert(
+                format!("{}_{}_FREQ", station_name, id_code),
+                ChannelInfo {
+                    data_type: freq_type,
+                    offset: current_offset + prefix_offset,
+                    size: freq_size,
+                },
+            );
+            current_offset += freq_size;
+
+            channel_map.insert(
+                format!("{}_{}_DFREQ", station_name, id_code),
+                ChannelInfo {
+                    data_type: dfreq_type,
+                    offset: current_offset + prefix_offset,
+                    size: freq_size,
+                },
+            );
+            current_offset += freq_size;
+
+            // Add analog channels
+            let analog_type = if pmu_config.format & 0x0004 != 0 {
+                ChannelDataType::AnalogFloat
+            } else {
+                ChannelDataType::AnalogFixed
+            };
+
+            let analog_size = pmu_config.analog_size();
+            for name in channel_names
+                .iter()
+                .skip(pmu_config.phnmr as usize) // skip the freq/dfreq values and the number of phasors
+                .take(pmu_config.annmr as usize)
+            {
+                channel_map.insert(
+                    name.clone(),
+                    ChannelInfo {
+                        data_type: analog_type.clone(),
+                        offset: current_offset + prefix_offset,
+                        size: analog_size,
+                    },
+                );
+                current_offset += analog_size;
+            }
+
+            // Add digital channels
+            for name in channel_names
+                .iter()
+                .skip(pmu_config.phnmr as usize + pmu_config.annmr as usize)
+                .take(pmu_config.dgnmr as usize)
+            {
+                channel_map.insert(
+                    name.clone(),
+                    ChannelInfo {
+                        data_type: ChannelDataType::Digital,
+                        offset: current_offset + prefix_offset,
+                        size: 2,
+                    },
+                );
+                current_offset += 2;
+            }
+        }
+
+        channel_map
     }
 }
 // This struct is repeated NUM_PMU times.

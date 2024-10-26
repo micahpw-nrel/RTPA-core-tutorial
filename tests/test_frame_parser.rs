@@ -1,4 +1,5 @@
 #![allow(unused)]
+use std::cmp::min;
 use std::fs;
 use std::path::Path;
 
@@ -127,6 +128,28 @@ mod tests {
     }
 
     #[test]
+    fn test_calc_data_frame_size() {
+        // Parse the configuration frame
+        let config_buffer = super::read_hex_file("config_message.bin").unwrap();
+        let config_frame = parse_config_frame_1and2(&config_buffer).unwrap();
+
+        // Calculate expected frame size
+        let calculated_size = config_frame.calc_data_frame_size();
+
+        // Get actual frame size from data_message.bin
+        let data_buffer = super::read_hex_file("data_message.bin").unwrap();
+        let actual_size = data_buffer.len();
+
+        // Get framesize from prefix
+        let prefix_size = u16::from_be_bytes([data_buffer[2], data_buffer[3]]);
+
+        // All sizes should match
+        assert_eq!(calculated_size, actual_size);
+        assert_eq!(calculated_size, prefix_size as usize);
+        assert_eq!(actual_size as u16, prefix_size);
+    }
+
+    #[test]
     fn test_parse_data_frame() {
         // First, parse the configuration frame
         let config_buffer = super::read_hex_file("config_message.bin").unwrap();
@@ -210,5 +233,214 @@ mod tests {
                                                            // Verify CRC
         let calculated_crc = calculate_crc(&data_buffer[..data_buffer.len() - 2]);
         assert_eq!(calculated_crc, data_frame.chk, "CRC mismatch in data frame");
+    }
+    #[test]
+    fn test_arrow_frame_creation() {
+        use arrow::array::{
+            Array, ArrayRef, Float32Array, Float64Array, Int16Array, Int32Array, StringArray,
+            TimestampMicrosecondArray, UInt16Array,
+        };
+        use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+        use arrow::record_batch::RecordBatch;
+        use pmu::arrow_utils::{build_arrow_schema, extract_channel_values};
+        use std::cmp::min;
+        use std::sync::Arc;
+
+        // First parse the configuration frame
+        let config_buffer = super::read_hex_file("config_message.bin").unwrap();
+        let config_frame = parse_config_frame_1and2(&config_buffer).unwrap();
+
+        // Get the channel map from config
+        let channel_map = config_frame.get_channel_map();
+        println!("\nChannel Map:");
+        for (name, info) in &channel_map {
+            println!("Channel: {}", name);
+            println!("  Offset: {}", info.offset);
+            println!("  Size: {}", info.size);
+            println!("  Type: {:?}", info.data_type);
+        }
+        // Create a 30kB buffer and fill it with repeated data frames
+        let data_frame = super::read_hex_file("data_message.bin").unwrap();
+        let frame_size = data_frame.len();
+        println!("\nFrame size: {}", frame_size);
+
+        let mut buffer = vec![0u8; 30 * 1024];
+
+        // Copy the data frame multiple times into the buffer
+        let num_frames = buffer.len() / frame_size;
+        for i in 0..num_frames {
+            let start = i * frame_size;
+            if start + frame_size <= buffer.len() {
+                buffer[start..start + frame_size].copy_from_slice(&data_frame);
+            }
+        }
+
+        // Build Arrow schema
+        let schema = build_arrow_schema(&channel_map);
+        println!("Arrow Schema: {:#?}", schema);
+
+        // Create arrays for each channel
+        let mut arrays: Vec<ArrayRef> = Vec::new();
+
+        // Add timestamp array - explicitly convert to ArrayRef
+        let mut timestamps = Vec::new();
+        for i in 0..num_frames {
+            let frame_start = i * frame_size;
+            if frame_start + frame_size <= buffer.len() {
+                let soc = u32::from_be_bytes([
+                    buffer[frame_start + 6],
+                    buffer[frame_start + 7],
+                    buffer[frame_start + 8],
+                    buffer[frame_start + 9],
+                ]);
+                let fracsec = u32::from_be_bytes([
+                    buffer[frame_start + 10],
+                    buffer[frame_start + 11],
+                    buffer[frame_start + 12],
+                    buffer[frame_start + 13],
+                ]);
+                timestamps.push((soc as i64) * 1_000_000 + (fracsec as i64));
+            }
+        }
+        let timestamp_array: ArrayRef = Arc::new(TimestampMicrosecondArray::from(timestamps));
+        arrays.push(timestamp_array);
+
+        // Extract values for each channel
+        for (name, info) in &channel_map {
+            println!("\nExtracting values for channel: {}", name);
+            let channel_arrays = extract_channel_values(&buffer, frame_size, info);
+
+            // Print first few values for debugging
+            println!("First few values:");
+            for (i, arr) in channel_arrays.iter().enumerate() {
+                print!("  Array {}: ", i);
+                for j in 0..min(5, arr.len()) {
+                    match arr.data_type() {
+                        DataType::Int16 => print!(
+                            "{:?} ",
+                            arr.as_any().downcast_ref::<Int16Array>().unwrap().value(j)
+                        ),
+                        DataType::Float32 => print!(
+                            "{:?} ",
+                            arr.as_any()
+                                .downcast_ref::<Float32Array>()
+                                .unwrap()
+                                .value(j)
+                        ),
+                        DataType::UInt16 => print!(
+                            "{:?} ",
+                            arr.as_any().downcast_ref::<UInt16Array>().unwrap().value(j)
+                        ),
+                        _ => print!("Unsupported type "),
+                    }
+                }
+                println!();
+            }
+            arrays.extend(channel_arrays);
+        }
+
+        // Create RecordBatch
+        let record_batch = RecordBatch::try_new(Arc::new(schema.clone()), arrays).unwrap();
+        // Print the first few rows for verification
+        println!("\nFirst few rows of RecordBatch:");
+        for i in 0..min(5, record_batch.num_rows()) {
+            print!("Row {}: ", i);
+            for j in 0..record_batch.num_columns() {
+                let col = record_batch.column(j);
+                match col.data_type() {
+                    DataType::Int16 => print!(
+                        "{:?} ",
+                        col.as_any().downcast_ref::<Int16Array>().unwrap().value(i)
+                    ),
+                    DataType::Float32 => print!(
+                        "{:?} ",
+                        col.as_any()
+                            .downcast_ref::<Float32Array>()
+                            .unwrap()
+                            .value(i)
+                    ),
+                    DataType::UInt16 => print!(
+                        "{:?} ",
+                        col.as_any().downcast_ref::<UInt16Array>().unwrap().value(i)
+                    ),
+                    DataType::Timestamp(_, _) => print!(
+                        "{:?} ",
+                        col.as_any()
+                            .downcast_ref::<TimestampMicrosecondArray>()
+                            .unwrap()
+                            .value(i)
+                    ),
+                    _ => print!("Unsupported type "),
+                }
+            }
+            println!();
+        }
+        // Verify the record batch
+        assert_eq!(record_batch.num_rows(), num_frames);
+        assert_eq!(record_batch.num_columns(), schema.fields().len());
+
+        // Test some specific values from the first row
+        let pmu_config = &config_frame.pmu_configs[0];
+
+        // Test specific values from the first row using column names
+        if let Some(freq_col) = record_batch
+            .column_by_name("Station A_7734_FREQ")
+            .and_then(|col| col.as_any().downcast_ref::<Int16Array>())
+        {
+            assert_eq!(freq_col.value(0), 2500, "Frequency value mismatch");
+        } else {
+            panic!("Failed to get frequency column");
+        }
+
+        // Test first phasor magnitude and angle
+        if let Some(mag_col) = record_batch
+            .column_by_name("Station A_7734_VA_X")
+            .and_then(|col| col.as_any().downcast_ref::<Int16Array>())
+        {
+            assert_eq!(mag_col.value(0), 14635, "Phasor X value mismatch");
+        } else {
+            panic!("Failed to get phasor X column");
+        }
+
+        if let Some(ang_col) = record_batch
+            .column_by_name("Station A_7734_VA_Y")
+            .and_then(|col| col.as_any().downcast_ref::<Int16Array>())
+        {
+            assert_eq!(ang_col.value(0), 0, "Phasor Y mismatch");
+        } else {
+            panic!("Failed to get phasor Y column");
+        }
+
+        // Test first analog value
+        if let Some(analog_col) = record_batch
+            .column_by_name("Station A_7734_ANALOG1")
+            .and_then(|col| col.as_any().downcast_ref::<Float32Array>())
+        {
+            assert_eq!(analog_col.value(0), 100.0, "Analog value mismatch");
+        } else {
+            panic!("Failed to get analog column");
+        }
+
+        // Test digital value
+        if let Some(digital_col) = record_batch
+            .column_by_name("Station A_7734_BREAKER 1 STATUS")
+            .and_then(|col| col.as_any().downcast_ref::<UInt16Array>())
+        {
+            assert_eq!(
+                digital_col.value(0),
+                0b0011110000010010,
+                "Digital value mismatch"
+            );
+        } else {
+            panic!("Failed to get digital column");
+        } // Print column names and first few values for debugging
+        println!("\nColumn values:");
+        for i in 0..record_batch.num_columns() {
+            println!(
+                "{}: {:?}",
+                schema.field(i).name(),
+                record_batch.column(i).slice(0, 5)
+            );
+        }
     }
 }
