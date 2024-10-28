@@ -5,15 +5,16 @@ name = "pmu"
 version = "0.1.0"
 edition = "2021"
 
+
 [dependencies]
+arrow = { version = "53.2.0", features = ["ipc"] }
+axum = "0.7.7"
 bytes = "1.7.1"
-circular-buffer = "0.1.8"
 clap = { version = "4.0", features = ["derive"] }
-env_logger = "0.11.5"
-femme = "2.2.1"
-log = "0.4.22"
-rand = "0.8.5"
-serde = "1.0.210"
-thiserror = "1.0.64"
 tokio = { version = "1", features = ["full"] }
-uuid = {version = "1.10.0", features = ["v4"]}
+tower = "0.5.1"
+tower-http = "0.6.1"
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["html_reports"] }
+reqwest = "0.12.8"

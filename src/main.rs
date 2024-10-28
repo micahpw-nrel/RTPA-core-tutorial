@@ -1,14 +1,12 @@
-#![allow(unused)]
-mod client;
-mod errors;
+mod arrow_utils;
+mod frame_parser;
+mod frames;
+mod pdc_buffer_server;
+mod pdc_client;
 mod pdc_server;
-mod phasor;
-mod server;
-use circular_buffer::CircularBuffer;
-use clap::{Args, Parser, Subcommand, ValueEnum};
-use client::TcpClient;
-use log::{info, warn};
-use pdc_server::{run_mock_server, PDCServer, Protocol, ServerConfig};
+use clap::{Parser, Subcommand};
+//use log::info;
+use pdc_server::{run_mock_server, Protocol, ServerConfig};
 use tokio::io;
 #[derive(Debug, Parser)] // requires `derive` feature
 #[command(name = "pmu")]
@@ -23,41 +21,62 @@ enum Commands {
     Server {
         #[arg(default_value = "127.0.0.1")]
         ip: String,
-        #[arg(default_value_t = 8080)]
+        #[arg(default_value_t = 8123)]
         port: u16,
     },
-    #[command(arg_required_else_help = true)]
-    Client { ip: String, port: u16, freq: f64 },
-    #[command(arg_required_else_help = true)]
-    Data { query: String },
+    //#[command(arg_required_else_help = true)]
+    Client {
+        #[arg(default_value = "127.0.0.1")]
+        ip: String,
+        #[arg(default_value_t = 8123)]
+        pdc_port: u16,
+        #[arg(default_value_t = 8080)]
+        http_port: u16,
+        #[arg(default_value_t = 120)]
+        duration: u16,
+    },
 }
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    env_logger::init();
-    info!("Starting application");
+    //env_logger::init();
+    //info!("Starting application");
 
     let args = Cli::parse();
 
     match args.command {
         Commands::Server { ip, port } => {
             println!("Using {ip} and port {port}");
-            let server_config = ServerConfig::new(ip, port, Protocol::TCP).unwrap();
-            let freq = 1.; // 1 Hz
-            let server = PDCServer::new(freq, 10).unwrap();
-            println!("{:#?}", server);
-            run_mock_server(server, server_config).await;
-        }
-        Commands::Client { ip, port, freq } => {
-            let server = PDCServer::new(freq, 10).unwrap();
+            let server_config = ServerConfig::new(ip, port, Protocol::TCP, 30.0).unwrap();
 
-            // Create buffer depending on the server configuration
-            // let mut buf = CircularBuffer::<60, u32>::new();
-            let mut client = TcpClient::new(ip, port).await.unwrap();
-            client.read_data().await?;
-            println!("{:#?}", &client);
+            run_mock_server(server_config)
+                .await
+                .expect("Server failed to start");
         }
-        Commands::Data { query } => {}
+        Commands::Client {
+            ip,
+            pdc_port,
+            http_port,
+            duration,
+        } => {
+            // Start the pdc buffer server
+            std::env::set_var("PDC_HOST", &ip);
+            std::env::set_var("PDC_PORT", &pdc_port.to_string());
+            std::env::set_var("SERVER_PORT", &http_port.to_string());
+            std::env::set_var("BUFFER_DURATION_SECS", &duration.to_string());
+
+            let buffer_server_handle = tokio::spawn(async move {
+                if let Err(e) = pdc_buffer_server::run().await {
+                    println!("Buffer server error: {}", e);
+                }
+            });
+            // Keep main thread running
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to listen for ctrl+c signal");
+            println!("Shutting down...");
+            buffer_server_handle.abort();
+        }
     }
     Ok(())
 }
