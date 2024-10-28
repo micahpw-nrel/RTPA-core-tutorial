@@ -14,28 +14,24 @@
 // What it shouldn't do. (for now)
 // Send configuration commands to the upstream pdc server.
 //
-#![allow(unused)]
+//#![allow(unused)]
+use crate::arrow_utils::{build_arrow_schema, extract_channel_values};
+use crate::frames::ConfigurationFrame1and2_2011;
+use crate::pdc_client::{ControlMessage, PDCClient};
+use arrow::array::ArrayRef;
+use arrow::array::TimestampMicrosecondArray;
+use arrow::ipc::writer::FileWriter;
+use arrow::record_batch::RecordBatch;
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
+use bytes::Bytes;
 use std::env;
 use std::net::SocketAddr;
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
+use tokio::sync::Mutex;
 
-use axum::{
-    extract::{Path, State},
-    http::StatusCode,
-    response::{IntoResponse, Json},
-    routing::get,
-    Router,
-};
-use serde::{Deserialize, Serialize};
-//use tower_http::trace::TraceLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-
-use crate::frame_parser::parse_frame;
-use crate::frames::{ChannelDataType, ChannelInfo, ConfigurationFrame1and2_2011};
-use crate::pdc_client::{ControlMessage, PDCClient};
-
-// Environment configuration struct
+// Basic configuration structure
 #[derive(Debug)]
 struct Config {
     pdc_host: String,
@@ -50,7 +46,7 @@ impl Config {
         Ok(Config {
             pdc_host: env::var("PDC_HOST").unwrap_or_else(|_| "localhost".to_string()),
             pdc_port: env::var("PDC_PORT")
-                .unwrap_or_else(|_| "4712".to_string())
+                .unwrap_or_else(|_| "8123".to_string())
                 .parse()
                 .map_err(|_| "Invalid PDC_PORT")?,
             pdc_idcode: env::var("PDC_IDCODE")
@@ -64,7 +60,7 @@ impl Config {
                     .map_err(|_| "Invalid BUFFER_DURATION_SECS")?,
             ),
             server_port: env::var("SERVER_PORT")
-                .unwrap_or_else(|_| "3000".to_string())
+                .unwrap_or_else(|_| "8080".to_string())
                 .parse()
                 .map_err(|_| "Invalid SERVER_PORT")?,
         })
@@ -75,152 +71,163 @@ impl Config {
 #[derive(Clone)]
 struct AppState {
     control_tx: mpsc::Sender<ControlMessage>,
+    //data_rx: mpsc::Receiver<Vec<u8>>,
+    config: ConfigurationFrame1and2_2011,
+    frame_size: usize,
+}
+
+// Response for configuration endpoint
+//async fn get_config(
+//State(state): State<AppState>,
+//) -> Result<Json<ConfigurationFrame1and2_2011>, StatusCode> {
+//let pdc_client = state
+//    .pdc_client
+//    .lock()
+//        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+//let config = match &pdc_client.config {
+//Some(config) => config,
+//None => return Err(StatusCode::NOT_FOUND),
+//};
+
+//config.map(Json)
+//StatusCode::NOT_IMPLEMENTED
+//}
+
+// Response for buffer data endpoint
+async fn get_buffer_data(
+    State(state): State<AppState>,
     data_rx: Arc<Mutex<mpsc::Receiver<Vec<u8>>>>,
-}
+) -> Result<impl IntoResponse, StatusCode> {
+    // Send request for buffer
+    state
+        .control_tx
+        .send(ControlMessage::GetBuffer)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // Wait for response
+    let buffer = {
+        let mut rx = data_rx.lock().await;
+        tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .map_err(|_| StatusCode::REQUEST_TIMEOUT)?
+            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+    // Get channel map from config
+    let channel_map = state.config.get_channel_map();
 
-// Response types
-#[derive(Serialize)]
-struct BufferResponse {
-    frames: Vec<DataFrame2011>,
-    timestamp: String,
-}
+    // Build Arrow schema
+    let schema = Arc::new(build_arrow_schema(&channel_map));
 
-#[derive(Serialize)]
-struct ErrorResponse {
-    error: String,
-}
+    // Create arrays for each channel
+    let mut arrays: Vec<ArrayRef> = Vec::new();
 
-// Request handlers
-async fn get_buffer(
-    State(state): State<AppState>,
-) -> Result<Json<BufferResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let pdc_client = state.pdc_client.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Failed to acquire lock".to_string(),
-            }),
-        )
-    })?;
+    // Add timestamp array
+    let mut timestamps = Vec::new();
 
-    let buffer = pdc_client.get_buffer_contents(None);
-    let frames = parse_buffer_to_frames(&buffer, &pdc_client).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
-
-    Ok(Json(BufferResponse {
-        frames,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-    }))
-}
-
-async fn get_last_n_seconds(
-    State(state): State<AppState>,
-    Path(seconds): Path<u64>,
-) -> Result<Json<BufferResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let pdc_client = state.pdc_client.lock().map_err(|_| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: "Failed to acquire lock".to_string(),
-            }),
-        )
-    })?;
-
-    let duration = Duration::from_secs(seconds);
-    let buffer = pdc_client.get_buffer_contents(Some(duration));
-    let frames = parse_buffer_to_frames(&buffer, &pdc_client).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: e.to_string(),
-            }),
-        )
-    })?;
-
-    Ok(Json(BufferResponse {
-        frames,
-        timestamp: chrono::Utc::now().to_rfc3339(),
-    }))
-}
-
-// Helper function to parse buffer into frames
-fn parse_buffer_to_frames(
-    buffer: &[Vec<u8>],
-    pdc_client: &PDCClient,
-) -> Result<Vec<DataFrame2011>, String> {
-    let mut frames = Vec::new();
-
-    for frame_data in buffer {
-        if let Ok(frame) = parse_frame(frame_data, pdc_client.config().clone()) {
-            if let Frame::Data(data_frame) = frame {
-                frames.push(data_frame);
-            }
+    for frame in buffer.chunks(state.frame_size) {
+        if frame.len() >= 14 {
+            let soc = u32::from_be_bytes([frame[6], frame[7], frame[8], frame[9]]);
+            let fracsec = u32::from_be_bytes([frame[10], frame[11], frame[12], frame[13]]);
+            timestamps.push((soc as i64) * 1_000_000 + (fracsec as i64));
         }
     }
+    arrays.push(Arc::new(TimestampMicrosecondArray::from(timestamps)));
 
-    Ok(frames)
+    // Extract values for each channel
+    for (_, info) in &channel_map {
+        let channel_arrays = extract_channel_values(&buffer, state.frame_size, info);
+        arrays.extend(channel_arrays);
+    }
+
+    // Create RecordBatch
+    let record_batch = RecordBatch::try_new(schema.clone(), arrays)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Serialize to Arrow IPC format
+    let mut buf = Vec::new();
+    {
+        let mut writer = FileWriter::try_new(&mut buf, &schema)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        writer
+            .write(&record_batch)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        writer
+            .finish()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    }
+
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/arrow-ipc")],
+        Bytes::from(buf),
+    ))
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize tracing
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
-        ))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
-
-    // Load configuration from environment
-    let config = Config::from_env().map_err(|e| {
-        eprintln!("Configuration error: {}", e);
-        std::process::exit(1);
-    })?;
+pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    // Load configuration
+    let config = Config::from_env()?;
 
     // Initialize PDC client
-    let pdc_client = PDCClient::new(
+    let (mut pdc_client, control_tx, data_rx) = match PDCClient::new(
         &config.pdc_host,
         config.pdc_port,
         config.pdc_idcode,
         config.buffer_duration,
     )
-    .map_err(|e| {
-        eprintln!("Failed to initialize PDC client: {}", e);
+    .await
+    {
+        Ok(client_tuple) => client_tuple,
+        Err(e) => {
+            eprintln!("Failed to connect to PDC server: {}", e);
+            // Exit the process with error code
+            std::process::exit(1);
+        }
+    };
+    // Start PDC client in background
+    // Get initial configuration
+
+    let frame_size = pdc_client.frame_size;
+    let pdc_config = pdc_client
+        .get_config()
+        .expect("No Configuration Frame, shutting down.");
+
+    let _client_handle = tokio::spawn(async move {
+        println!("PDC client stream started");
+        pdc_client.start_stream().await;
+        println!("PDC client stream ended");
         std::process::exit(1);
-    })?;
-
-    // Start PDC client stream
-    let pdc_client = Arc::new(Mutex::new(pdc_client));
-    let pdc_client_clone = Arc::clone(&pdc_client);
-
-    tokio::spawn(async move {
-        let mut client = pdc_client_clone.lock().unwrap();
-        client.start_stream();
     });
 
-    // Create router with application state
-    let app_state = AppState { pdc_client };
+    // Create application state
+    let app_state = AppState {
+        control_tx,
+        config: pdc_config,
+        frame_size,
+    };
 
+    // Create a shared data receiver
+    let data_rx = Arc::new(Mutex::new(data_rx));
+    let data_rx_clone = data_rx.clone();
+
+    // Build router with access to data_rx
     let app = Router::new()
-        .route("/buffer", get(get_buffer))
-        .route("/buffer/:seconds", get(get_last_n_seconds))
-        .layer(TraceLayer::new_for_http())
+        //.route("/config", get(get_config))
+        .route(
+            "/data",
+            get(move |state| get_buffer_data(state, data_rx_clone.clone())),
+        )
         .with_state(app_state);
 
-    // Build server address
-    let addr = SocketAddr::from(([127, 0, 0, 1], config.server_port));
-    tracing::info!("listening on {}", addr);
-
     // Start server
-    axum::Server::bind(&addr)
-        .serve(app.into_make_service())
-        .await?;
+    let addr = SocketAddr::from(([127, 0, 0, 1], config.server_port));
+    println!("Server listening on {}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    println!("listening on {}", listener.local_addr().unwrap());
+    axum::serve(listener, app).await.unwrap();
 
     Ok(())
 }

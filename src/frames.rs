@@ -24,7 +24,7 @@ pub fn calculate_crc(buffer: &[u8]) -> u16 {
     crc
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PrefixFrame2011 {
     pub sync: u16, // Leading byte = AA hex,
     // second byte: Frame type and version
@@ -271,7 +271,7 @@ pub struct ChannelInfo {
     pub size: usize,   // Size in bytes
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConfigurationFrame1and2_2011 {
     pub prefix: PrefixFrame2011,
     pub time_base: u32, // Resolution of
@@ -421,7 +421,7 @@ impl ConfigurationFrame1and2_2011 {
 }
 // This struct is repeated NUM_PMU times.
 // For parsing entire configuration frame, need to take into account num_pmu.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PMUConfigurationFrame2011 {
     pub stn: [u8; 16], // Station Name 16 bytes ASCII
     pub idcode: u16,   // Data source ID number, identifies source of each data block.

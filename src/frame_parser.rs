@@ -1,15 +1,12 @@
 #![allow(unused)]
-
 use crate::frames::{
-    calculate_crc, ConfigurationFrame1and2_2011, DataFrame2011, HeaderFrame2011,
-    PMUConfigurationFrame2011, PMUDataFrame, PMUDataFrameFixedFreq2011, PMUDataFrameFloatFreq2011,
-    PMUFrameType, PrefixFrame2011,
+    calculate_crc, CommandFrame2011, ConfigurationFrame1and2_2011, DataFrame2011, HeaderFrame2011,
+    PMUConfigurationFrame2011, PMUDataFrameFixedFreq2011, PMUDataFrameFloatFreq2011, PMUFrameType,
+    PrefixFrame2011,
 };
 
 // Define constants
 const PREFIX_SIZE: usize = 14; // Size of HeaderFrame2011 in bytes
-const CONFIG_HEADER_SIZE: usize = 6;
-const TAIL_SIZE: usize = 2; // Size of TailFrame2011 in bytes
 
 #[derive(Debug)]
 pub enum ParseError {
@@ -27,6 +24,7 @@ pub enum Frame {
     Prefix(PrefixFrame2011),
     Configuration(ConfigurationFrame1and2_2011),
     Data(DataFrame2011),
+    Command(CommandFrame2011),
 }
 
 pub fn parse_header(buffer: &[u8]) -> Result<HeaderFrame2011, ParseError> {
@@ -35,7 +33,25 @@ pub fn parse_header(buffer: &[u8]) -> Result<HeaderFrame2011, ParseError> {
 
 pub fn parse_command_frame(buffer: &[u8]) -> Result<Frame, ParseError> {
     // TODO/skip
-    todo!("Implement command frame parsing")
+    let prefix_slice: &[u8; PREFIX_SIZE] = buffer[..PREFIX_SIZE].try_into().unwrap();
+    let prefix = PrefixFrame2011::from_hex(prefix_slice).map_err(|_| ParseError::InvalidHeader)?;
+
+    let command = u16::from_be_bytes([buffer[PREFIX_SIZE], buffer[PREFIX_SIZE + 1]]);
+
+    let extframe = if buffer.len() > PREFIX_SIZE + 4 {
+        Some(buffer[PREFIX_SIZE + 2..buffer.len() - 2].to_vec())
+    } else {
+        None
+    };
+
+    let chk = u16::from_be_bytes([buffer[buffer.len() - 2], buffer[buffer.len() - 1]]);
+
+    Ok(Frame::Command(CommandFrame2011 {
+        prefix,
+        command,
+        extframe,
+        chk,
+    }))
 }
 
 pub fn parse_data_frames(
@@ -146,9 +162,6 @@ pub fn parse_data_frames(
 }
 
 pub fn parse_config_frame_1and2(buffer: &[u8]) -> Result<ConfigurationFrame1and2_2011, ParseError> {
-    // Unsure about return type right now. Needs to be some sort
-    // of nested structure.
-
     // get the header frame struct using the parse_header_frame function
 
     let prefix_slice: &[u8; PREFIX_SIZE] = buffer[..PREFIX_SIZE].try_into().unwrap();
@@ -275,7 +288,7 @@ pub fn parse_config_frame_3(buffer: &[u8]) -> Result<Frame, ParseError> {
 
 pub fn parse_frame(
     buffer: &[u8],
-    config: ConfigurationFrame1and2_2011,
+    config: Option<ConfigurationFrame1and2_2011>,
 ) -> Result<Frame, ParseError> {
     // read first two bytes as the sync variable.
     // read second byte and convert to binary
@@ -283,22 +296,31 @@ pub fn parse_frame(
     // if bits 3-0 == 0001, use IEEEstandard 2005
     // if bits 3-0 == 0010, use IEEE standard from 2011
     // if bits 3-0 do not equal 0010, throw ParseError:VersionNotSupported
+    println!("Reading Frame Prefix");
     let sync = u16::from_be_bytes([buffer[0], buffer[1]]);
     if sync >> 8 != 0xAA {
+        println!("Invalid Sync value");
         return Err(ParseError::InvalidHeader);
     }
+    println!("Reading version");
     let version = buffer[1] & 0b1111;
 
     match version {
         1 => {
             // Use IEEE standard 2005
-            return Err(ParseError::VersionNotSupported);
+            //
+            println!("Standard 2005 not supported");
+            //return Err(ParseError::VersionNotSupported);
         }
         2 => {
+            println!("Standard 2011 detected");
             // Use IEEE standard 2011
             // No error
         }
-        _ => return Err(ParseError::VersionNotSupported),
+        _ => {
+            println!("Unknown version detected");
+            return Err(ParseError::VersionNotSupported);
+        }
     }
 
     // Next, get framesize variable at bytes 3-4
@@ -309,10 +331,11 @@ pub fn parse_frame(
     if framesize as usize != buffer.len() {
         return Err(ParseError::InvalidFrameSize);
     }
-
+    println!("Calculating CRC");
     let calculated_crc = calculate_crc(&buffer[..buffer.len() - 2]);
     let frame_crc = u16::from_be_bytes([buffer[buffer.len() - 2], buffer[buffer.len() - 1]]);
     if calculated_crc != frame_crc {
+        println!("Invalid CRC");
         return Err(ParseError::InvalidCRC);
     }
 
@@ -322,22 +345,34 @@ pub fn parse_frame(
     // if bits 6-4 equal 010 or 011 -> parse_config_frame_1and2(buffer, framesize)
     // If bits 6-4 equal 101 -> parse_config_frame_3(buffer, framesize)
     // if bits 6-4 equal 100 -> parse_command_frame(buffer, framesize)
+    println!("Determining Frame Type");
     let frame_type = (buffer[1] >> 4) & 0b111;
     match frame_type {
-        0b000 => {
-            let data_frame = parse_data_frames(buffer, &config)?;
-            Ok(Frame::Data(data_frame))
-        }
+        0b000 => match config {
+            Some(config) => {
+                let data_frame = parse_data_frames(buffer, &config)?;
+                Ok(Frame::Data(data_frame))
+            }
+            None => {
+                println!("Configuration Frame required to parse data frame.");
+                Err(ParseError::InsufficientData)
+            }
+        },
         0b001 => {
+            println!("Parsing Header");
             let header = parse_header(buffer)?;
             Ok(Frame::Header(header))
         }
         0b010 | 0b011 => {
+            println!("parsing config frame");
             let config = parse_config_frame_1and2(buffer)?;
             Ok(Frame::Configuration(config))
         }
         0b101 => parse_config_frame_3(buffer),
-        0b100 => parse_command_frame(buffer),
+        0b100 => {
+            println!("Parsing command frame");
+            parse_command_frame(buffer)
+        }
         _ => Err(ParseError::InvalidFrameSize),
     }
 }

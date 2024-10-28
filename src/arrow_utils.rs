@@ -1,13 +1,6 @@
-#![allow(unused)]
-#![allow(unused)]
-use crate::frames::{ChannelDataType, ChannelInfo, ConfigurationFrame1and2_2011};
-use arrow::array::{
-    ArrayRef, Float32Array, Float64Array, Int16Array, Int32Array, StringArray, UInt16Array,
-};
+use crate::frames::{ChannelDataType, ChannelInfo};
+use arrow::array::{ArrayRef, Float32Array, Int16Array, UInt16Array};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-use arrow::ipc::writer::FileWriter;
-use arrow::record_batch::RecordBatch;
-use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::Arc;
 
