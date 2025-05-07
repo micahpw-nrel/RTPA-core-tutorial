@@ -5,9 +5,10 @@ mod pdc_buffer_server;
 mod pdc_client;
 mod pdc_server;
 use clap::{Parser, Subcommand};
-//use log::info;
+use log::info;
 use pdc_server::{run_mock_server, Protocol, ServerConfig};
 use tokio::io;
+
 #[derive(Debug, Parser)] // requires `derive` feature
 #[command(name = "pmu")]
 #[command(about = "Testing PMU", long_about = None)]
@@ -21,8 +22,21 @@ enum Commands {
     MockPDC {
         #[arg(long, default_value = "127.0.0.1")]
         ip: String,
+
         #[arg(long, default_value_t = 8123)]
         port: u16,
+
+        #[arg(long, default_value_t = 30.0)]
+        data_rate: f64,
+
+        #[arg(long)]
+        num_pmus: Option<usize>,
+
+        #[arg(long, default_value = "2005")]
+        version: String,
+
+        #[arg(long, default_value_t = false)]
+        polar: bool,
     },
     //#[command(arg_required_else_help = true)]
     Server {
@@ -41,15 +55,39 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    //env_logger::init();
-    //info!("Starting application");
+    env_logger::init();
+    println!("Starting application");
 
     let args = Cli::parse();
 
     match args.command {
-        Commands::MockPDC { ip, port } => {
+        Commands::MockPDC {
+            ip,
+            port,
+            data_rate,
+            num_pmus,
+            version,
+            polar,
+        } => {
             println!("Using {ip} and port {port}");
-            let server_config = ServerConfig::new(ip, port, Protocol::TCP, 30.0).unwrap();
+
+            // Configuration mode message
+            if num_pmus.is_some() {
+                println!("Running in random PMU mode with {} PMUs", num_pmus.unwrap());
+            } else {
+                println!("Running in fixed test data mode");
+            }
+
+            let server_config = ServerConfig::new(
+                ip,
+                port,
+                Protocol::TCP,
+                data_rate,
+                num_pmus,
+                &version,
+                polar,
+            )
+            .unwrap();
 
             run_mock_server(server_config)
                 .await
@@ -78,7 +116,7 @@ async fn main() -> io::Result<()> {
             tokio::signal::ctrl_c()
                 .await
                 .expect("Failed to listen for ctrl+c signal");
-            println!("Shutting down...");
+            info!("Shutting down...");
             buffer_server_handle.abort();
         }
     }

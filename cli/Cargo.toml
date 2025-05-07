@@ -1,0 +1,32 @@
+[package]
+name = "rtpa_cli"
+version = "0.0.1"
+authors.workspace = true
+license.workspace = true
+edition.workspace = true
+description = "Mock PDC server for IEEE C37.118 frame generation and testing."
+
+[[bin]]
+name = "rtpa"
+path = "src/main.rs"
+
+[dependencies]
+# Reference the core library
+rtpa_core = { path = "../core" }
+
+# CLI-specific dependencies
+arrow = { workspace = true, features = ["ipc"] }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5.1"
+tower-http = "0.6.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+log = "0.4.27"
+axum = "0.8.3"
+bytes = "1.10.1"
+clap.workspace = true
+env_logger = "0.11.8"
